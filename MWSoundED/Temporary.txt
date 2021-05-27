@@ -1,0 +1,262 @@
+﻿ //aMfcc = new AccordMfcc(wave.MonoSignal, 12, 24, wave.Format.SampleRate, frameSize, frameShift, 0, 4000);
+
+//*******************************************************************************************************************//
+public void NewPerson(string path, string person) // добавляет из файла модель в библиотеку всех моделей 
+        {
+            try
+            {
+                List<double> buffer = new List<double>(); // временный буфер
+
+                Model model = new Model(); // создание временной модели
+
+                model.Init(); // инициализация временной модели
+
+                mixtureModel.LoadModel(path, numberMixture, numberVariables); // загрузка модели диктора
+
+                // копирование коэффициентов
+                for (int i = 0; i < numberMixture; i++)
+                {
+                    model.Coefficients.Add(mixtureModel.Coefficients[i]);
+                    model.ExpectationCoefficients.Add(mixtureModel.ExpectationCoefficients[i]);
+                }
+
+                // копирование средних значений
+                for (int i = 0; i < numberVariables; i++)
+                {
+                    for (int j = 0; j < numberMixture; j++)
+                        buffer.Add(mixtureModel.Means[i][j]);
+
+                    model.Means.Add(buffer.ToArray());
+
+                    buffer.Clear();
+                }
+
+                // копирование ковариационных матриц
+                for (int i = 0; i < numberMixture; i++)
+                {
+                    for (int j = 0; j < numberVariables; j++)
+                        buffer.Add(mixtureModel.CovarianceMatrix[i][j]);
+
+                    model.CovarianceMatrix.Add(buffer.ToArray());
+
+                    buffer.Clear();
+
+                    for (int j = 0; j < numberVariables; j++)
+                        buffer.Add(mixtureModel.CovarianceInverse[i][j]);
+
+                    model.CovarianceInverse.Add(buffer.ToArray());
+
+                    buffer.Clear();
+                }
+
+                mixtureModels[person] = model; // добавление модели в библиотеку
+            }
+            catch (Exception e)
+            {
+                MessageBox.Show(e.Message, "Ошибка!", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+//*******************************************************************************************************************//
+        private double Probability(double[][] variablesData) // возвращает вероятность (Чего? Пока не разобрался.) 
+        {
+            double prob; // вероятность
+
+            // инициализация
+            List<double> mixedProb = new List<double>();
+            List<double[]> normProb = new List<double[]>();
+
+            // выделение памяти вместо буфера
+            for (int i = 0; i < variablesData.Length; i++)
+                normProb.Add(new double[numberMixture]);
+
+            // вычисление вероятности
+            prob = InternalProbability(variablesData, mixtureModel, normProb, mixedProb);
+
+            return prob;
+        }
+//*******************************************************************************************************************//
+private double[][] GetFeaturesFromText() // для проверки алгоритма GMM реализовал получение признаков из другого файла другого проекта
+        {
+            double[][] features = new double[499][];
+            for (int i = 0; i < 499; i++)
+                features[i] = new double[12];
+
+            using (StreamReader sr = new StreamReader("D:\\Мои файлы\\VSProjects\\SpeakersNewRecog\\SpeakersNewRecog\\bin\\Debug\\MFCC\\0.mfcc"))
+            {
+                string[] line; // строка данных из файла
+
+                int i = 0;
+
+                while (i < 499)
+                {
+                    line = sr.ReadLine().Split(' '); // считывается строка данных компонент смеси
+
+                    // прасится и добавляется в массив коэффициентов
+                    for (int j = 0; j < 12; j++)
+                        features[i][j] = double.Parse(line[j]);
+
+                    i++;
+                }
+
+            }
+            return features;
+        }
+//*******************************************************************************************************************//
+
+#region Функции постобработки признаков
+
+        double[][] Normalization(double[][] array) // нормализация 
+        {
+            for (int i = 0; i < array[0].Length; i++)
+            {
+                List<double> buffer = new List<double>();
+
+                double mean = 0, std = 0;
+
+                for (int j = 0; j < array.Length; j++)
+                    buffer.Add(array[j][i]);
+
+                mean = Mean(buffer.ToArray()); // среднее
+                std = Std(buffer.ToArray()); // стандартное отклонение
+
+                for (int j = 0; j < frameCount; j++)
+                    array[j][i] = (array[j][i] - mean) / std;
+            }
+
+            return array;
+        }
+
+        double Mean(double[] array) // среднее значение
+        {
+            double m = 0;
+
+            for (int i = 0; i < array.Length; i++)
+                m += array[i];
+
+            m /= array.Length;
+
+            return m;
+        }
+
+        double Std(double[] array) // стандартное отклонение
+        {
+            double m = 0;
+            double s = 0;
+
+            for (int i = 0; i < array.Length; i++)
+                m += array[i];
+
+            m /= array.Length;
+
+            for (int i = 0; i < array.Length; i++)
+                s += Math.Pow(array[i] - m, 2);
+
+            s = Math.Sqrt(s / array.Length - 1);
+
+            return s;
+        }
+
+        #endregion
+
+/*******************************************************************************************************/
+double[][] FeaturesDeltaDelta(bool energy, bool dDelta) // получение дельта и двойных дельта значений
+        {
+            int newNumCoeff = 0;
+
+            double[][] featuresForProcess = null;
+
+            // для тестирования вычисления дельт с энергией или без (withoutEnergy -> features)
+            if (energy)
+            {
+                newNumCoeff = numberCoefficients;
+                featuresForProcess = (double[][])features.Clone();
+            }
+            else
+            {
+                newNumCoeff = numberCoefficients - 1;
+                featuresForProcess = FeaturesWithoutEnergy();
+            }
+
+            // инициализация
+            double[][] deltaFeatures = new double[frameCount][]; // дельта-коэффициенты
+            for (int i = 0; i < frameCount; i++)
+                deltaFeatures[i] = new double[newNumCoeff * 2];
+
+            // инициализация
+            double[][] dDeltaFeatures = new double[frameCount][]; // коэффициенты ускорения
+            for (int i = 0; i < frameCount; i++)
+                dDeltaFeatures[i] = new double[newNumCoeff * 3];
+
+            for (int i = 0; i < frameCount; i++)
+            {
+                double[] buffer = DeltaProcess(featuresForProcess[i]); // временное значение дельт первого порядка
+                double[] buffer2 = DeltaProcess(buffer); // временное значение дельт второго порядка
+
+                for (int j = 0; j < newNumCoeff * 3; j++)
+                {
+                    if (j < newNumCoeff)
+                    {
+                        deltaFeatures[i][j] = featuresForProcess[i][j]; // первый порядок (mfcc)
+                        dDeltaFeatures[i][j] = featuresForProcess[i][j]; // второй порядок (mfcc)
+                    }
+                    else if (j >= newNumCoeff && j < newNumCoeff * 2)
+                    {
+                        deltaFeatures[i][j] = buffer[j - newNumCoeff];  // первый порядок (delta)
+                        dDeltaFeatures[i][j] = buffer[j - newNumCoeff]; // второй порядок (delta)
+                    }
+                    else if (j >= newNumCoeff * 2)
+                    {
+                        dDeltaFeatures[i][j] = buffer2[j - newNumCoeff * 2]; // второй порядок (delta-delta)
+                    }
+                }
+            }
+
+            if (dDelta) return dDeltaFeatures;
+
+            return deltaFeatures;
+        }
+
+        double[] DeltaProcess(double[] vector) // функция вычисления дельт
+        {
+            double[] delta = new double[vector.Length];
+
+            double num, denom;
+
+            int N = 2; //deltawindow, accwindow (HTK)
+
+            int next, last;
+
+            for (int i = 0; i < vector.Length; i++)
+            {
+                num = 0; denom = 0;
+
+                for (int j = 1; j <= N; j++)
+                {
+                    next = i + j > vector.Length - 1 ? vector.Length - 1 : i + j;
+                    last = i - j < 0 ? 0 : i - j;
+
+                    num += j * (vector[next] - vector[last]);
+                    denom += 2 * j * j;
+                }
+
+                delta[i] = num / denom;
+            }
+
+            return delta;
+        }
+////////////////////////////////////////////////////--- ПЕРИОДОГРАММЫ СПЕКТРА
+//spectre = new double[frameCount][];
+            //for (int index = 0; index < frameCount; index++)
+            //    spectre[index] = new double[windowSize / 2 + 1];
+
+            //for (int i = 0; i < frameCount; i++)
+            //    for (int j = 0; j < windowSize / 2 + 1; j++)
+            //    {
+            //        spectre[i][j] = fourier[i][j].Real * fourier[i][j].Real
+            //            + fourier[i][j].Imaginary * fourier[i][j].Imaginary;
+
+            //        if (normalization) spectre[i][j] /= windowSize;
+
+            //        // TODO: Магнитундый спектр
+
+            //    }
